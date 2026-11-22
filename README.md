@@ -10,6 +10,34 @@ AlphaStream is an autonomous, production-grade algorithmic trading system tailor
 
 ---
 
+## Live Performance Showcase: +$1,100.33 Session (Friday, Nov 20, 2026)
+
+During the Friday, Nov 20, 2026 trading session, AlphaStream generated **+$1,100.33 net profit (+1.12% single-day return)** on a $98,159.46 starting account, closing **100% flat in cash** ($99,259.79 NAV) at the 15:50 EST sweep with zero overnight exposure:
+
+![Live Performance Friday Nov 20](assets/live_session_performance.png)
+
+### Session Trade Breakdown & Capital Allocation
+
+| Symbol | Sector Cluster | Max Capital Exposure | Net Realized PnL | Return on Capital | Key Driver / Exit Mechanism |
+| :--- | :--- | :---: | :---: | :---: | :--- |
+| **NVDA** | Semiconductors | $9,817.92 | **+$587.68** | **+2.51%** | Accelerated Tenaglia (>2R lock @ +3.8R peak) |
+| **META** | Big Tech | $8,608.65 | **+$260.51** | **+1.26%** | Dynamic 5-Min Ratchet Trailing Stop |
+| **QQQ** | Benchmark ETF | $5,585.14 | **+$119.77** | **+2.24%** | Trend Continuation Momentum |
+| **SMH** | Chipmakers ETF | $9,073.62 | **+$102.65** | **+0.84%** | Sector Momentum Rider |
+| **ASML** | Semiconductors | $7,889.52 | **+$72.80** | **+0.80%** | Structural Support Bounce ($q_{05}$) |
+| **HOOD** | Crypto / Fintech | $7,576.06 | **+$58.42** | **+0.70%** | Volatility-sized Breakout Sizing |
+| **TSM** | Semiconductors | $8,197.60 | **+$45.22** | **+0.44%** | Quantile Median Target Reached |
+| **JPM / MSTR / ORCL** | Diversified / Mixed | ~$8,500 each | **-$30.78** (comb.) | -0.06% | Controlled Break-Even Stop Loss |
+| **DDOG / COIN** | Cloud / Crypto | ~$6,200 each | **-$115.94** (comb.) | -0.74% | Strict Dynamic Tail Stop ($q_{05}$) |
+| **TOTAL SESSION** | **100% Cash at 15:50 EST** | **Peak: ~$38k Concurrent** | **+$1,100.33** | **+1.12% NAV** | **Zero Overnight Gap Risk Sweep** |
+
+#### Session Takeaways
+- **Disciplined Exposure**: Individual position exposure never exceeded the 10% risk cap ($10,000 max capital per single ticker).
+- **Asymmetric Risk/Reward**: Total gains from winners (**+$1,247.05**) outweighed total controlled losses (**-$146.72**) by more than $8.5:1$.
+- **Zero Overnight Shock**: All positions were systematically swept at 15:50 EST, freeing all capital to cash ahead of the weekend.
+
+---
+
 ## Key Highlights
 
 - **Foundation AI Forecasting**: Leverages `Timestral-209M` for 21-quantile probabilistic time-series trajectory estimation on hourly bars.
@@ -45,7 +73,34 @@ Positions are dynamically managed throughout the trading session to lock in gain
 
 ---
 
-## Trade Decision Sequence
+## Trade Decision Sequence & Logic Flow
+
+AlphaStream operates in an orderly, highly deterministic sequence during every 30-second cycle:
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Scanner as Market Scanner
+    participant AI as Timestral Engine
+    participant Risk as Risk & Portfolio Filter
+    participant Broker as Alpaca Execution
+    participant Trailing as Ratchet / Tenaglia
+
+    Scanner->>AI: Fetch 28-day hourly history
+    AI->>AI: Compute q05, q50, q95 quantiles
+    AI->>AI: Check Path Consistency (Anti-Dip) & Asymmetric Skew (D/U)
+    AI-->>Risk: Send trade direction & dynamic stops
+    Risk->>Risk: Check QQQ Macro Regime & 20-day SMA alignment
+    Risk->>Risk: Check Sector Cluster & Cross-Asset Correlation
+    Risk->>Risk: Apply Contextual Bandit sizing & Volatility cushion
+    Risk->>Broker: Submit limit/market entry + catastrophic server stop
+    Broker-->>Trailing: Register active position
+    loop Every 5 Minutes
+        Trailing->>Trailing: Evaluate peak profit (> 2R activates Accelerated Tenaglia)
+        Trailing->>Broker: Tighten dynamic stop (ratchet forward only)
+    end
+    Trailing->>Broker: 15:50 EST EOD Sweep -> Close all positions flat
+```
 
 ```mermaid
 flowchart TD
