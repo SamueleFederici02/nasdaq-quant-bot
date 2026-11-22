@@ -1,0 +1,22 @@
+# Framework Trading
+lumibot
+alpaca-py
+
+# Dati di Mercato & News
+finnhub-python
+yfinance
+requests
+
+# IA & NLP (Google Gemini)
+google-genai
+
+# Analisi Dati
+pandas
+numpy
+
+# Ambiente & Configurazione
+python-dotenv
+pydantic
+
+# Dashboard (per test successivi)
+streamlit

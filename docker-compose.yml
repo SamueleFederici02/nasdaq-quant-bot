@@ -1,0 +1,15 @@
+version: '3.8'
+
+services:
+  trading-bot:
+    build: .
+    container_name: nasdaq_quant_bot
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 1500M
+    volumes:
+      - ./data:/app/data
+      - ./.env:/app/.env
+    command: python main.py
