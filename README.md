@@ -87,8 +87,8 @@ flowchart TD
 
 1. **Clone the repository:**
    ```bash
-   git clone https://github.com/your-username/alphastream-quant.git
-   cd alphastream-quant
+   git clone https://github.com/SamueleFederici02/nasdaq-quant-bot.git
+   cd nasdaq-quant-bot
    ```
 
 2. **Configure environment variables:**
