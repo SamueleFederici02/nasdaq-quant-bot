@@ -45,6 +45,26 @@ def compute_atr(df_sym, period: int = 14, default_pct: float = 0.018) -> float:
         closes = df_sym["close"].tolist() if "close" in df_sym else [100.0]
         return float(closes[-1]) * default_pct
 
+def extract_regular_market_open(df: pd.DataFrame) -> float:
+    """
+    Estrae il prezzo di apertura della sessione regolare di Wall Street (09:30 EST)
+    per la giornata odierna, evitando distorsioni dovute al gap pre-market delle 04:00 AM.
+    """
+    if df is None or df.empty:
+        return 100.0
+    try:
+        idx_ny = df.index.tz_convert('America/New_York') if df.index.tz is not None else df.index
+        today_mask = (idx_ny.date == idx_ny[-1].date())
+        reg_mask = today_mask & (idx_ny.hour >= 9)
+        df_reg = df[reg_mask]
+        if not df_reg.empty:
+            return float(df_reg["open"].iloc[0])
+        elif today_mask.any():
+            return float(df[today_mask]["open"].iloc[0])
+    except Exception:
+        pass
+    return float(df["open"].iloc[-min(7, len(df))])
+
 class NasdaqTimestralStrategy(Strategy):
     parameters = {
         "symbols": DEFAULT_SYMBOLS,
@@ -145,7 +165,7 @@ class NasdaqTimestralStrategy(Strategy):
                 ema20 = float(pd.Series(q_closes).ewm(span=20, adjust=False).mean().iloc[-1])
                 curr_q = float(q_closes[-1])
                 dist_ema = ((curr_q - ema20) / ema20) * 100
-                day_open = float(df_q["open"].iloc[-min(7, len(df_q))])
+                day_open = extract_regular_market_open(df_q)
                 intraday_pct = ((curr_q - day_open) / day_open) * 100
 
                 curr_regime = self.last_macro_regime
@@ -1075,7 +1095,7 @@ class NasdaqTimestralStrategy(Strategy):
 
                 closes = df_sym["close"].tolist()
                 curr_price = float(closes[-1])
-                day_open = float(df_sym["open"].iloc[-min(7, len(df_sym))])
+                day_open = extract_regular_market_open(df_sym)
                 intraday_pct = ((curr_price - day_open) / day_open) * 100 if day_open > 0 else 0.0
 
                 # Spunto 3: Anti-Exhaustion Guard (Filtro Rubber-Band / Rimbalzo Tecnico Eccessivo)
