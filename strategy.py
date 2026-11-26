@@ -92,6 +92,7 @@ class NasdaqTimestralStrategy(Strategy):
         "v_recovery_bounce_pct": RISK_CONFIG.get("V_RECOVERY_BOUNCE_PCT", 0.90),           # Rimbalzo minimo dai minimi intraday di QQQ (+0.90%) per V-Shape Recovery
         "short_max_qqq_intraday_pct": RISK_CONFIG.get("SHORT_MAX_QQQ_INTRADAY_PCT", 0.10), # Max intraday QQQ (+0.10%) per autorizzare short
         "short_min_stock_intraday_pct": RISK_CONFIG.get("SHORT_MIN_STOCK_INTRADAY_PCT", -0.50), # Min ribasso intraday (-0.50%) per shortare un titolo
+        "long_only_symbols": RISK_CONFIG.get("LONG_ONLY_SYMBOLS", ["TSLA"]),               # Titoli vincolati esclusivamente a posizioni LONG (No Short)
     }
 
     def initialize(self):
@@ -1315,6 +1316,12 @@ class NasdaqTimestralStrategy(Strategy):
                 # VETO INTRADAY TREND & ANTI-REVENGE PER OPERAZIONI SHORT
                 # -----------------------------------------------------------------
                 if trade_side == "short":
+                    # 0. Veto Titoli Vincolati a Long-Only (es. TSLA contro retail short-squeeze)
+                    long_only_list = self.parameters.get("long_only_symbols", ["TSLA"])
+                    if symbol in long_only_list:
+                        logger.info(f"[*] LONG-ONLY RULE: Bloccato SHORT su {symbol} (titolo vincolato a Long-Only anti-squeeze). Operazione scartata.")
+                        continue
+
                     # 1. Veto Mercato Rialzista: vietato shortare se QQQ intraday supera la soglia (+0.10%)
                     short_max_qqq = self.parameters.get("short_max_qqq_intraday_pct", 0.10)
                     qqq_intra = macro.get("qqq_intraday_pct", 0.0)

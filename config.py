@@ -50,14 +50,15 @@ RISK_CONFIG = {
     "V_RECOVERY_BOUNCE_PCT": 0.90,           # Rimbalzo minimo dai minimi intraday di QQQ (+0.90%) per attivare il V-Shape Recovery Circuit Breaker
     "SHORT_MAX_QQQ_INTRADAY_PCT": 0.10,      # Massimo intraday di QQQ (+0.10%) oltre il quale qualsiasi operazione SHORT viene categoricamente vietata
     "SHORT_MIN_STOCK_INTRADAY_PCT": -0.50,   # Minimo ribasso intraday del titolo (-0.50%) richiesto per autorizzare uno SHORT (vietato shortare titoli verdi o piatti)
+    "LONG_ONLY_SYMBOLS": ["TSLA"],           # Titoli ad altissimo rischio squeeze retail: vietato shortare, ammessi SOLO ingressi LONG
 }
 
 # Mappatura Cluster Settoriali per Anti-Concentrazione
 SECTOR_CLUSTERS = {
-    "SEMICONDUCTORS": ["NVDA", "AMD", "AVGO", "TSM", "ARM", "QCOM", "ASML", "SMH"],
-    "BIG_TECH_SOFTWARE": ["AAPL", "MSFT", "GOOGL", "AMZN", "META", "ORCL", "NFLX", "PLTR", "SNOW", "DDOG", "CRWD", "PANW", "APP"],
-    "CRYPTO_FINTECH": ["COIN", "MSTR", "HOOD", "PYPL"],
-    "CONSUMER_DIVERSIFIED": ["TSLA", "COST", "LLY", "JPM", "UBER", "SPY", "QQQ"]
+    "SEMICONDUCTORS": ["NVDA", "AMD", "AVGO", "TSM", "ARM", "ASML", "SMH"],
+    "BIG_TECH_SOFTWARE": ["AAPL", "MSFT", "GOOGL", "AMZN", "META", "ORCL", "NFLX", "PLTR", "SNOW", "CRWD", "PANW", "APP"],
+    "CRYPTO_FINTECH": ["MSTR", "HOOD", "PYPL"],
+    "CONSUMER_DIVERSIFIED": ["TSLA", "COST", "LLY", "JPM", "SPY", "QQQ"]
 }
 
 def get_symbol_cluster(symbol: str) -> str:
@@ -67,7 +68,7 @@ def get_symbol_cluster(symbol: str) -> str:
             return cluster
     return "OTHER"
 
-# Panieri Operativi per lo Scanner del Bot
+# Panieri Operativi per lo Scanner del Bot (Esclusi i titoli tossici a 0% win rate: UBER, COIN, DDOG, QCOM)
 WATCHLIST_CONFIG = {
     # 1. Benchmark e Macro ETF (Sentiment Generale & Chipmakers)
     "BENCHMARKS": ["QQQ", "SPY", "SMH"],
@@ -75,16 +76,16 @@ WATCHLIST_CONFIG = {
     # 2. Titani della Tecnologia & Monopoli Semiconduttori (Mega-Caps)
     "TECH_TITANS": [
         "AAPL", "MSFT", "NVDA", "AMZN", "GOOGL", "META", 
-        "TSLA", "AVGO", "TSM", "AMD", "ASML", "ORCL", "QCOM", "NFLX"
+        "TSLA", "AVGO", "TSM", "AMD", "ASML", "ORCL", "NFLX"
     ],
 
     # 3. Stabilizzatori Non-Tech (Diversificazione solida & Difensivi)
-    "STABILIZERS": ["COST", "LLY", "JPM", "UBER"],
+    "STABILIZERS": ["COST", "LLY", "JPM"],
 
     # 4. Hyper-Growth & Nuove Promesse AI/Fintech/Cyber (Alta Volatilita')
     "GROWTH_STARS": [
-        "PLTR", "ARM", "CRWD", "PANW", "COIN", 
-        "APP", "SNOW", "HOOD", "MSTR", "DDOG"
+        "PLTR", "ARM", "CRWD", "PANW", 
+        "APP", "SNOW", "HOOD", "MSTR"
     ]
 }
 
