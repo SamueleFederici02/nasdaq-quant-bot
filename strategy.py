@@ -89,6 +89,9 @@ class NasdaqTimestralStrategy(Strategy):
         "timestral_lookback_days": RISK_CONFIG.get("TIMESTRAL_LOOKBACK_DAYS", 28),         # Lookback storico candele orarie (28 giorni = 1 mese di borsa per contesto strutturale)
         "max_skew_ratio_long": RISK_CONFIG.get("MAX_SKEW_RATIO_LONG", 2.0),               # Max Downside/Upside ratio per LONG
         "min_skew_ratio_short": RISK_CONFIG.get("MIN_SKEW_RATIO_SHORT", 0.75),             # Min Downside/Upside ratio per SHORT
+        "v_recovery_bounce_pct": RISK_CONFIG.get("V_RECOVERY_BOUNCE_PCT", 0.90),           # Rimbalzo minimo dai minimi intraday di QQQ (+0.90%) per V-Shape Recovery
+        "short_max_qqq_intraday_pct": RISK_CONFIG.get("SHORT_MAX_QQQ_INTRADAY_PCT", 0.10), # Max intraday QQQ (+0.10%) per autorizzare short
+        "short_min_stock_intraday_pct": RISK_CONFIG.get("SHORT_MIN_STOCK_INTRADAY_PCT", -0.50), # Min ribasso intraday (-0.50%) per shortare un titolo
     }
 
     def initialize(self):
@@ -118,12 +121,16 @@ class NasdaqTimestralStrategy(Strategy):
         self.max_adverse_excursions: Dict[str, float] = {}
         self.notified_tiers: Dict[str, int] = {}
         self.notified_tenaglia: Dict[str, bool] = {}
-        
-        # Spunto 1: Macro Regime Switch QQQ con Isteresi & Debounce
+        self.stopped_trade_info: Dict[str, Dict[str, Any]] = {}
+
+        # Spunto 1: Macro Regime Switch QQQ con Isteresi & Debounce & V-Shape Recovery
         self.last_macro_regime: str = "NEUTRAL"
         self.last_macro_regime_change: datetime = datetime.now() - timedelta(minutes=60)
         self.last_macro_check: datetime = datetime.min
         self.current_macro_info: Dict[str, Any] = {"regime": "NEUTRAL", "allow_long": True, "allow_short": True, "qqq_intraday_pct": 0.0}
+        self.qqq_session_low: float = float("inf")
+        self.qqq_session_high: float = 0.0
+        self.last_qqq_session_date = None
 
         # Batch Market Trends & Portfolio Risk Metrics (Covariance & Quality Momentum)
         self.daily_sma20: Dict[str, float] = {}
@@ -140,13 +147,16 @@ class NasdaqTimestralStrategy(Strategy):
 
     def evaluate_macro_regime(self) -> Dict[str, Any]:
         """
-        Macro Regime Switch su QQQ (Nasdaq-100 ETF) con Isteresi (Deadband) & Debounce Temporale.
+        Macro Regime Switch su QQQ (Nasdaq-100 ETF) con Isteresi (Deadband), Debounce Temporale
+        e V-Shape Recovery Circuit Breaker.
         Evita il continuo flickering/whipsaw tra LONG e SHORT:
         - Per entrare in BULLISH: QQQ >= +0.70% e sopra EMA20 (oppure >= +1.2%).
         - Per USCIRE da BULLISH a NEUTRAL: QQQ deve scendere sotto +0.20% oppure sotto EMA20 con <= +0.35%.
         - Per entrare in BEARISH: QQQ <= -0.80% e sotto EMA20 (oppure <= -1.2%).
         - Per USCIRE da BEARISH a NEUTRAL: QQQ deve salire sopra -0.20% oppure sopra EMA20 con >= -0.35%.
-        - Cooldown minimo tra cambi di regime: 15 minuti (salvo flash-crash <= -1.8%).
+        - Cooldown minimo tra cambi di regime: 15 minuti (salvo flash-crash <= -1.8% o V-Recovery).
+        - V-Shape Recovery Breaker: se in BEARISH QQQ rimbalza >= +0.90% dal minimo o supera +0.10% intraday,
+          il regime ribassista viene revocato istantaneamente e gli short bloccati.
         """
         now = datetime.now()
         if (now - self.last_macro_check).total_seconds() < 120 and self.current_macro_info:
@@ -168,39 +178,66 @@ class NasdaqTimestralStrategy(Strategy):
                 day_open = extract_regular_market_open(df_q)
                 intraday_pct = ((curr_q - day_open) / day_open) * 100
 
+                # Tracciamento minimi e massimi di seduta per QQQ
+                today_date = now.date()
+                if self.last_qqq_session_date != today_date:
+                    self.last_qqq_session_date = today_date
+                    self.qqq_session_low = curr_q
+                    self.qqq_session_high = curr_q
+                else:
+                    self.qqq_session_low = min(self.qqq_session_low, curr_q)
+                    self.qqq_session_high = max(self.qqq_session_high, curr_q)
+
+                bounce_from_low_pct = 0.0
+                if self.qqq_session_low > 0 and self.qqq_session_low < float("inf"):
+                    bounce_from_low_pct = ((curr_q - self.qqq_session_low) / self.qqq_session_low) * 100
+
+                v_bounce_thresh = self.parameters.get("v_recovery_bounce_pct", 0.90)
+                short_max_qqq_pct = self.parameters.get("short_max_qqq_intraday_pct", 0.10)
+
                 curr_regime = self.last_macro_regime
                 candidate_regime = curr_regime
 
-                # 1. Logica di Isteresi (Banda Morta / Deadband)
-                if curr_regime == "RISK_ON_BULLISH":
-                    if intraday_pct <= -0.80 and curr_q < ema20:
-                        candidate_regime = "RISK_OFF_BEARISH"
-                    elif intraday_pct < 0.20 or (curr_q < ema20 and intraday_pct < 0.35):
-                        candidate_regime = "NEUTRAL"
-                    else:
-                        candidate_regime = "RISK_ON_BULLISH"
-                elif curr_regime == "RISK_OFF_BEARISH":
-                    if intraday_pct >= 0.70 and curr_q > ema20:
-                        candidate_regime = "RISK_ON_BULLISH"
-                    elif intraday_pct > -0.20 or (curr_q > ema20 and intraday_pct > -0.35):
-                        candidate_regime = "NEUTRAL"
-                    else:
-                        candidate_regime = "RISK_OFF_BEARISH"
-                else: # NEUTRAL
-                    if intraday_pct <= -1.2 or (curr_q < ema20 and intraday_pct <= -0.80):
-                        candidate_regime = "RISK_OFF_BEARISH"
-                    elif intraday_pct >= +1.2 or (curr_q > ema20 and intraday_pct >= +0.70):
-                        candidate_regime = "RISK_ON_BULLISH"
-                    else:
-                        candidate_regime = "NEUTRAL"
+                # Rilevazione V-Shape Recovery Circuit Breaker
+                is_v_recovery = (curr_regime == "RISK_OFF_BEARISH" and (bounce_from_low_pct >= v_bounce_thresh or intraday_pct >= short_max_qqq_pct))
 
-                # 2. Debounce / Cooldown temporale (almeno 15 minuti tra cambi, salvo flash crash <= -1.8%)
+                if is_v_recovery:
+                    candidate_regime = "RISK_ON_BULLISH" if (intraday_pct >= 0.70 and curr_q > ema20) else "NEUTRAL"
+                    logger.warning(
+                        f"⚡ [CIRCUIT BREAKER V-RECOVERY] Rilevato rimbalzo QQQ di +{bounce_from_low_pct:.2f}% dai minimi (${self.qqq_session_low:.2f} -> ${curr_q:.2f}, Intraday: {intraday_pct:+.2f}%). "
+                        f"Revoca immediata del regime RISK_OFF_BEARISH -> {candidate_regime}!"
+                    )
+                else:
+                    # 1. Logica di Isteresi (Banda Morta / Deadband)
+                    if curr_regime == "RISK_ON_BULLISH":
+                        if intraday_pct <= -0.80 and curr_q < ema20:
+                            candidate_regime = "RISK_OFF_BEARISH"
+                        elif intraday_pct < 0.20 or (curr_q < ema20 and intraday_pct < 0.35):
+                            candidate_regime = "NEUTRAL"
+                        else:
+                            candidate_regime = "RISK_ON_BULLISH"
+                    elif curr_regime == "RISK_OFF_BEARISH":
+                        if intraday_pct >= 0.70 and curr_q > ema20:
+                            candidate_regime = "RISK_ON_BULLISH"
+                        elif intraday_pct > -0.20 or (curr_q > ema20 and intraday_pct > -0.35):
+                            candidate_regime = "NEUTRAL"
+                        else:
+                            candidate_regime = "RISK_OFF_BEARISH"
+                    else: # NEUTRAL
+                        if intraday_pct <= -1.2 or (curr_q < ema20 and intraday_pct <= -0.80):
+                            candidate_regime = "RISK_OFF_BEARISH"
+                        elif intraday_pct >= +1.2 or (curr_q > ema20 and intraday_pct >= +0.70):
+                            candidate_regime = "RISK_ON_BULLISH"
+                        else:
+                            candidate_regime = "NEUTRAL"
+
+                # 2. Debounce / Cooldown temporale (almeno 15 minuti tra cambi, salvo flash crash <= -1.8% o V-Recovery)
                 time_since_switch = (now - self.last_macro_regime_change).total_seconds()
                 is_emergency_crash = (intraday_pct <= -1.8)
 
                 target_regime = curr_regime
                 if candidate_regime != curr_regime:
-                    if time_since_switch >= 900 or is_emergency_crash:
+                    if time_since_switch >= 900 or is_emergency_crash or is_v_recovery:
                         target_regime = candidate_regime
                     else:
                         rem_m = int((900 - time_since_switch) / 60)
@@ -208,7 +245,8 @@ class NasdaqTimestralStrategy(Strategy):
                         target_regime = curr_regime
 
                 allow_long = (target_regime != "RISK_OFF_BEARISH")
-                allow_short = (target_regime != "RISK_ON_BULLISH")
+                # Vietato shortare se target_regime è RISK_ON_BULLISH oppure se QQQ intraday supera la soglia massima (es. +0.10%)
+                allow_short = (target_regime != "RISK_ON_BULLISH") and (intraday_pct <= short_max_qqq_pct)
 
                 macro_info = {
                     "regime": target_regime,
@@ -217,20 +255,27 @@ class NasdaqTimestralStrategy(Strategy):
                     "qqq_curr": round(curr_q, 2),
                     "qqq_ema20": round(ema20, 2),
                     "qqq_dist_ema_pct": round(dist_ema, 2),
-                    "qqq_intraday_pct": round(intraday_pct, 2)
+                    "qqq_intraday_pct": round(intraday_pct, 2),
+                    "is_v_recovery": is_v_recovery,
+                    "qqq_session_low": round(self.qqq_session_low, 2),
+                    "bounce_from_low_pct": round(bounce_from_low_pct, 2)
                 }
 
                 if target_regime != self.last_macro_regime:
                     logger.warning(f"[CAMBIO REGIME MACRO CONFERMATO] Passaggio da {self.last_macro_regime} a {target_regime} (QQQ: ${curr_q:.2f}, Intraday: {intraday_pct:+.2f}%, vs EMA20: {dist_ema:+.2f}%)")
-                    regime_icon = "🔴" if target_regime == "RISK_OFF_BEARISH" else ("🟢" if target_regime == "RISK_ON_BULLISH" else "⚪")
+                    regime_icon = "⚡" if is_v_recovery else ("🔴" if target_regime == "RISK_OFF_BEARISH" else ("🟢" if target_regime == "RISK_ON_BULLISH" else "⚪"))
                     perm_str = "SOLO SHORT autorizzati (LONG bloccati)" if target_regime == "RISK_OFF_BEARISH" else ("SOLO LONG autorizzati (SHORT bloccati)" if target_regime == "RISK_ON_BULLISH" else "Bidirezionale (LONG & SHORT)")
+                    if not allow_short:
+                        perm_str += f" | SHORT BLOCCATI (QQQ > +{short_max_qqq_pct:.2f}%)"
                     try:
+                        extra_v = f"\n• ⚡ <b>V-Shape Recovery: rimbalzo +{bounce_from_low_pct:.2f}% dal minimo!</b>" if is_v_recovery else ""
                         send_notification(
                             f"{regime_icon} <b>CAMBIO REGIME MACRO NASDAQ ({target_regime})</b>\n\n"
                             f"• Indice QQQ: <b>${curr_q:.2f}</b> ({intraday_pct:+.2f}% intraday)\n"
+                            f"• Minimo di Seduta: <b>${self.qqq_session_low:.2f}</b>{extra_v}\n"
                             f"• Distanza da EMA20 oraria: <b>{dist_ema:+.2f}%</b>\n"
                             f"• Politica Operativa: <b>{perm_str}</b>\n"
-                            f"• <i>Stabilità garantita da filtro isteresi & debounce anti-whipsaw</i>"
+                            f"• <i>Stabilità garantita da filtro isteresi, debounce & V-recovery circuit breaker</i>"
                         )
                     except Exception:
                         pass
@@ -512,6 +557,105 @@ class NasdaqTimestralStrategy(Strategy):
                 else:
                     logger.info(f"🌙 [END-OF-DAY CASH SWEEP] Orario NY: {now_ny.strftime('%H:%M:%S')} EST. Portafoglio già 100% flat (nessuna posizione aperta). Nessuna nuova operazione.")
                     return
+
+        # ---------------------------------------------------------------------
+        # 0-BIS. VALUTAZIONE REGIME MACRO & CIRCUIT BREAKER V-SHAPE RECOVERY
+        # ---------------------------------------------------------------------
+        macro = self.evaluate_macro_regime()
+        regime = macro.get("regime", "NEUTRAL")
+        allow_long = macro.get("allow_long", True)
+        allow_short = macro.get("allow_short", True)
+        qqq_intraday = macro.get("qqq_intraday_pct", 0.0)
+        is_v_recovery = macro.get("is_v_recovery", False)
+
+        # Se QQQ registra un rimbalzo violento dai minimi (is_v_recovery) o torna ampiamente
+        # positivo (>= +0.20%), chiudi istantaneamente a mercato qualsiasi posizione SHORT aperta
+        # per neutralizzare al 100% il rischio di short-squeeze da trend-reversal.
+        if positions and (is_v_recovery or qqq_intraday >= 0.20):
+            short_positions = [p for p in positions if p.quantity < 0]
+            if short_positions:
+                bounce_val = macro.get("bounce_from_low_pct", 0.0)
+                logger.warning(
+                    f"⚡ [CIRCUIT BREAKER V-RECOVERY] Rilevato rimbalzo QQQ (+{bounce_val:.2f}% dai minimi o intraday {qqq_intraday:+.2f}%). "
+                    f"Avvio liquidazione d'emergenza immediata di {len(short_positions)} posizioni SHORT!"
+                )
+                for pos in short_positions:
+                    symbol = pos.symbol
+                    qty = abs(pos.quantity)
+                    curr_price = self.get_last_price(symbol) or float(getattr(pos, "current_price", getattr(pos, "avg_entry_price", 0.0)))
+                    entry_price = self.entry_prices.get(symbol, float(getattr(pos, "avg_entry_price", curr_price)))
+
+                    # 1. Cancella ordini attivi
+                    active_orders = [o for o in self.get_orders() if getattr(o, "symbol", "") == symbol and hasattr(o, "is_active") and o.is_active()]
+                    for o in active_orders:
+                        try:
+                            self.cancel_order(o)
+                        except Exception:
+                            pass
+                    if active_orders:
+                        time.sleep(1.0)
+
+                    # 2. Invia ordine di chiusura BUY TO COVER
+                    try:
+                        close_order = self.create_order(symbol, quantity=qty, side="buy")
+                        self.submit_order(close_order)
+                        logger.info(f"[V-RECOVERY FLUSH] Inviato ordine BUY TO COVER per {qty} azioni di {symbol}")
+                    except Exception as err:
+                        logger.error(f"[V-RECOVERY ERROR] Errore liquidazione short {symbol}: {err}")
+                        continue
+
+                    pnl_dollars = (entry_price - curr_price) * qty
+                    pnl_pct = ((entry_price - curr_price) / entry_price) * 100 if entry_price > 0 else 0.0
+                    pnl_icon = "🟢" if pnl_dollars >= 0 else "🔴"
+                    pnl_sign = "+" if pnl_dollars >= 0 else ""
+
+                    try:
+                        send_notification(
+                            f"⚡ <b>CIRCUIT BREAKER: V-SHAPE RECOVERY SHORT FLUSH</b>\n\n"
+                            f"• Titolo: <b>{symbol}</b> (SHORT chiuso d'emergenza)\n"
+                            f"• Azioni coperte: <b>{qty}</b>\n"
+                            f"• Prezzo Carico: <b>${entry_price:.2f}</b>\n"
+                            f"• Prezzo Uscita: <b>${curr_price:.2f}</b>\n"
+                            f"• Risultato Trade: {pnl_icon} <b>{pnl_sign}${pnl_dollars:,.2f} ({pnl_pct:+.2f}%)</b>\n"
+                            f"• Rimbalzo QQQ da Minimo: <b>+{bounce_val:.2f}%</b> (Intraday: {qqq_intraday:+.2f}%)\n"
+                            f"• <i>Chiusura tempestiva automatica per evitare squeeze da trend-reversal violento!</i>"
+                        )
+                    except Exception:
+                        pass
+
+                    peak_fav = self.peak_profits.pop(symbol, 0.0)
+                    mae_adv = self.max_adverse_excursions.pop(symbol, 0.0)
+                    try:
+                        self.learner.record_trade_result(
+                            symbol=symbol,
+                            side="short",
+                            pnl_pct=pnl_pct,
+                            pnl_dollars=pnl_dollars,
+                            exit_reason="v_recovery_breaker",
+                            peak_profit_pct=peak_fav,
+                            mae_pct=mae_adv
+                        )
+                    except Exception:
+                        pass
+
+                    self.active_stops.pop(symbol, None)
+                    self.entry_prices.pop(symbol, None)
+                    self.last_stop_update.pop(symbol, None)
+                    self.notified_tiers.pop(symbol, None)
+                    self.notified_tenaglia.pop(symbol, None)
+
+                    # Cooldown e tracciamento stop per evitare re-ingresso
+                    self.stopped_trade_info[symbol] = {
+                        "side": "short",
+                        "price": curr_price,
+                        "date": datetime.now().date()
+                    }
+                    cooldown_until = datetime.now() + timedelta(minutes=75)
+                    self.ticker_cooldowns[symbol] = cooldown_until
+
+                # Ricarica posizioni aggiornate post-liquidazione
+                positions = self.get_positions()
+                pos_symbols = [p.symbol for p in positions] if positions else []
 
         # ---------------------------------------------------------------------
         # 1. WATCHDOG POSIZIONI APERTE (Cricchetto Long & Short / Ratchet)
@@ -824,7 +968,12 @@ class NasdaqTimestralStrategy(Strategy):
                 if pnl_dollars < 0:
                     cooldown_until = datetime.now() + timedelta(minutes=75)
                     self.ticker_cooldowns[symbol] = cooldown_until
-                    logger.info(f"[COOLDOWN STOP LOSS] {symbol} messo in pausa per 75 minuti fino alle {cooldown_until.strftime('%H:%M:%S')} (anti-whipsaw)")
+                    self.stopped_trade_info[symbol] = {
+                        "side": "short" if is_short else "long",
+                        "price": curr_price,
+                        "date": datetime.now().date()
+                    }
+                    logger.info(f"[COOLDOWN STOP LOSS] {symbol} messo in pausa per 75 minuti fino alle {cooldown_until.strftime('%H:%M:%S')} (anti-whipsaw, stop registrato a ${curr_price:.2f})")
                 else:
                     cooldown_min = self.parameters.get("profit_reentry_cooldown_min", 15)
                     cooldown_until = datetime.now() + timedelta(minutes=cooldown_min)
@@ -904,6 +1053,11 @@ class NasdaqTimestralStrategy(Strategy):
                 if pnl_dollars < 0:
                     cooldown_until = datetime.now() + timedelta(minutes=75)
                     self.ticker_cooldowns[symbol] = cooldown_until
+                    self.stopped_trade_info[symbol] = {
+                        "side": "short" if is_short else "long",
+                        "price": curr_price,
+                        "date": datetime.now().date()
+                    }
                     logger.info(f"[COOLDOWN EARNINGS EXIT] {symbol} chiuso pre-trimestrale in perdita. Pausa di 75 minuti fino alle {cooldown_until.strftime('%H:%M:%S')} (anti-whipsaw)")
                 else:
                     cooldown_min = self.parameters.get("profit_reentry_cooldown_min", 15)
@@ -981,6 +1135,11 @@ class NasdaqTimestralStrategy(Strategy):
                 if pnl_dollars < 0:
                     cooldown_until = datetime.now() + timedelta(minutes=75)
                     self.ticker_cooldowns[symbol] = cooldown_until
+                    self.stopped_trade_info[symbol] = {
+                        "side": "short" if is_short else "long",
+                        "price": curr_price,
+                        "date": datetime.now().date()
+                    }
                     logger.info(f"[COOLDOWN NEWS VETO] {symbol} messo in pausa per 75 minuti fino alle {cooldown_until.strftime('%H:%M:%S')} (anti-whipsaw)")
                 else:
                     cooldown_min = self.parameters.get("profit_reentry_cooldown_min", 15)
@@ -1126,26 +1285,16 @@ class NasdaqTimestralStrategy(Strategy):
                 rs_val = self.rs_scores.get(symbol, 0.0)
 
                 # -----------------------------------------------------------------
-                # REGIME-FORCED SHORT & BREAKDOWN MOMENTUM (RISOLUZIONE BOTTLENECK)
+                # REGIME-FORCED SHORT RIMOSSO (ANTI-SHORT SQUEEZE):
+                # Uno SHORT è ammesso esclusivamente se Timestral-209M ha previsto un
+                # ribasso effettivo (t_res["is_bearish"] == True), OPPURE nel caso di un
+                # crollo isolato eccezionale (OUTLIER_BREAKDOWN_MOMENTUM) con debolezza conclamata.
                 # -----------------------------------------------------------------
-                # Se siamo in RISK_OFF_BEARISH (QQQ sprofonda), i LONG sono comunque vietati.
-                # Se Timestral vede un rimbalzo ma il titolo scende intraday e rompe supporti,
-                # verifichiamo che traiettoria e skew non indichino uno spike anomalo contro lo short.
-                if regime == "RISK_OFF_BEARISH" and trade_side != "short":
-                    if t_res.get("path_consistent_short", True) and t_res.get("skew_ok_short", True):
-                        if intraday_pct <= -0.5 and rs_val <= 0.2:
-                            # Se il titolo è sotto la SMA20 Daily OPPURE sta perdendo oltre il -1.5% intraday
-                            if (daily_sma20 and curr_price < daily_sma20) or intraday_pct <= -1.5:
-                                trade_side = "short"
-                                trigger_reason = "REGIME_FORCED_BEARISH_MOMENTUM"
-                                logger.info(f"[+] REGIME-FORCED SHORT: {symbol} convertito in SHORT in regime {regime}! (Intraday: {intraday_pct:+.2f}%, RS vs QQQ: {rs_val:+.2f}%, Skew D/U: {t_res.get('skewness_ratio')}).")
-
-                # CASO B: Outlier Breakdown anche in regime Neutrale/Bullish (se un titolo crolla da solo)
-                elif trade_side != "short" and intraday_pct <= -2.5 and rs_val <= -2.5:
-                    if t_res.get("path_consistent_short", True):
+                if trade_side != "short" and intraday_pct <= -3.0 and rs_val <= -3.0:
+                    if not t_res.get("is_bullish", False) and t_res.get("path_consistent_short", True):
                         trade_side = "short"
                         trigger_reason = "OUTLIER_BREAKDOWN_MOMENTUM"
-                        logger.info(f"[+] OUTLIER BREAKDOWN SHORT attivato per {symbol}! (Intraday: {intraday_pct:+.2f}%, RS: {rs_val:+.2f}%).")
+                        logger.info(f"[+] OUTLIER BREAKDOWN SHORT autorizzato per {symbol}! (Intraday: {intraday_pct:+.2f}%, RS: {rs_val:+.2f}%).")
 
                 if not trade_side:
                     # Logging diagnostico se scartato dai filtri qualitativi di traiettoria o skewness
@@ -1161,6 +1310,41 @@ class NasdaqTimestralStrategy(Strategy):
                         elif not t_res.get("skew_ok_short", True):
                             logger.info(f"[*] SKEW FILTER: Scartato segnale SHORT su {symbol} per potenziale ribassista asimmetrico debole (Skew D/U: {t_res.get('skewness_ratio')} < {self.parameters.get('min_skew_ratio_short', 0.75)})")
                     continue
+
+                # -----------------------------------------------------------------
+                # VETO INTRADAY TREND & ANTI-REVENGE PER OPERAZIONI SHORT
+                # -----------------------------------------------------------------
+                if trade_side == "short":
+                    # 1. Veto Mercato Rialzista: vietato shortare se QQQ intraday supera la soglia (+0.10%)
+                    short_max_qqq = self.parameters.get("short_max_qqq_intraday_pct", 0.10)
+                    qqq_intra = macro.get("qqq_intraday_pct", 0.0)
+                    if qqq_intra > short_max_qqq:
+                        logger.info(f"[*] SHORT VETO: Bloccato short su {symbol} (QQQ {qqq_intra:+.2f}% > +{short_max_qqq:.2f}%). Vietato shortare con mercato rialzista!")
+                        continue
+
+                    # 2. Veto Titolo Forte/Verde: vietato shortare titoli verdi o piatti (richiesto almeno -0.50%)
+                    short_min_stock = self.parameters.get("short_min_stock_intraday_pct", -0.50)
+                    if intraday_pct > short_min_stock:
+                        logger.info(f"[*] SHORT VETO: Bloccato short su {symbol} (Intraday {intraday_pct:+.2f}% > {short_min_stock:+.2f}%). Vietato shortare titoli verdi o resilienti!")
+                        continue
+
+                    # 3. Veto Ridosso Massimi: vietato shortare se il prezzo scambia a meno dello 0.8% dai massimi di giornata
+                    try:
+                        day_high = float(df_sym["high"].iloc[-min(7, len(df_sym)):].max())
+                    except Exception:
+                        day_high = curr_price
+                    if day_high > 0 and curr_price >= (day_high * 0.992):
+                        dist_high_pct = ((day_high - curr_price) / day_high) * 100
+                        logger.info(f"[*] SHORT VETO: Bloccato short su {symbol} a ridosso dei massimi (${curr_price:.2f} vs High ${day_high:.2f}, distanza -{dist_high_pct:.2f}% < 0.8%). Rischio squeeze!")
+                        continue
+
+                    # 4. Veto Anti-Revenge Trading: vietato re-shortare lo stesso giorno a prezzo uguale o superiore allo stop preso
+                    stopped_info = self.stopped_trade_info.get(symbol)
+                    if stopped_info and stopped_info.get("date") == datetime.now().date() and stopped_info.get("side") == "short":
+                        last_stop_p = stopped_info.get("price", 0.0)
+                        if curr_price >= (last_stop_p * 0.995):
+                            logger.info(f"[*] SHORT ANTI-REVENGE VETO: Bloccato short su {symbol} (già stoppato oggi a ${last_stop_p:.2f}, prezzo attuale ${curr_price:.2f} >= ${last_stop_p * 0.995:.2f}). Evitato revenge trading!")
+                            continue
 
                 # Spunto 1 & Miglioramento C: Controllo direzionale Macro Regime QQQ + Permesso Outlier
                 if trade_side == "long" and not allow_long:

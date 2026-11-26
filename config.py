@@ -47,6 +47,9 @@ RISK_CONFIG = {
     "TIMESTRAL_LOOKBACK_DAYS": 28,           # Lookback storico candele orarie (28 giorni = 1 mese di borsa per contesto strutturale)
     "MAX_SKEW_RATIO_LONG": 2.0,              # Massimo rapporto Downside/Upside (D/U <= 2.0) per autorizzare ingressi LONG
     "MIN_SKEW_RATIO_SHORT": 0.75,            # Minimo rapporto Downside/Upside (D/U >= 0.75) per autorizzare ingressi SHORT
+    "V_RECOVERY_BOUNCE_PCT": 0.90,           # Rimbalzo minimo dai minimi intraday di QQQ (+0.90%) per attivare il V-Shape Recovery Circuit Breaker
+    "SHORT_MAX_QQQ_INTRADAY_PCT": 0.10,      # Massimo intraday di QQQ (+0.10%) oltre il quale qualsiasi operazione SHORT viene categoricamente vietata
+    "SHORT_MIN_STOCK_INTRADAY_PCT": -0.50,   # Minimo ribasso intraday del titolo (-0.50%) richiesto per autorizzare uno SHORT (vietato shortare titoli verdi o piatti)
 }
 
 # Mappatura Cluster Settoriali per Anti-Concentrazione
